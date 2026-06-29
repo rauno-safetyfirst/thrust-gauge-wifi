@@ -31,6 +31,9 @@ pio run -t uploadfs -e ota      # OTA HTML update, no cable needed
 
 OTA password: `thrust`
 
+> **Märkus:** `thrust-gauge.local` ei tööta OTA üleslaadimiseks — kasuta IP-d otse.
+> IP: `192.168.68.53` (kontrolli ruuterist kui ESP32 taaskäivitub ja IP muutub)
+
 ## WiFi credentials
 In `src/main.cpp` lines 10–11:
 ```cpp
@@ -40,11 +43,11 @@ static const char* WIFI_PASS = "leipomo25";
 
 ## Access
 - Dashboard: `http://thrust-gauge.local`
-- WebSocket: `ws://thrust-gauge.local:81`
+- WebSocket: `ws://thrust-gauge.local/ws`
 - IP (fallback): check router or Serial monitor at 115200 baud
 
 ## WebSocket API
-ESP32 broadcasts JSON every HX711 reading (~2Hz):
+ESP32 broadcasts JSON every HX711 reading (~10Hz):
 ```json
 {"g": 1234.5, "avg": 1198.3, "rpm": 4250}
 ```
@@ -54,7 +57,6 @@ ESP32 broadcasts JSON every HX711 reading (~2Hz):
 
 Browser → ESP32 commands (text):
 - `tare` — zero the load cell + clear avg buffer
-- `resetmax` — clear avg buffer only
 
 ## Serial commands (115200 baud, USB)
 ```
@@ -89,12 +91,13 @@ keep them in sync: after editing `web/index.html`, copy to `data/` before `uploa
 | PULSES_PER_REV | 2 | 2 magnets on motor shaft |
 | RPM_TIMEOUT_US | 2000000 | 2s no pulse → RPM=0 |
 | AVG_WINDOW_MS | 3000 | 3s sliding average window |
-| AVG_SAMPLES | 5 | HX711 averaging per reading |
+| AVG_SAMPLES | 1 | HX711 averaging per reading (1 = fastest, no blocking) |
 
 ## Current status
 - [x] HX711 + load cell working, calibrated
 - [x] WiFi + mDNS (thrust-gauge.local)
 - [x] WebSocket dashboard with graph, Newton/gram/RPM display
 - [x] OTA firmware + filesystem updates
+- [x] WiFi power save keelatud (WiFi.setSleep(false)) — ping stabiilne 6-30ms
 - [x] Hall sensor RPM — code ready, sensor not yet wired
 - [ ] Hall sensor physically connected (waiting for hardware)

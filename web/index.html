@@ -91,6 +91,10 @@
 
 <div class="values">
   <div class="box">
+    <label>RPM</label>
+    <div class="val" id="rpm" style="color:#af7">---</div>
+  </div>
+  <div class="box">
     <label>NEWTONS</label>
     <div class="val" id="newtons" style="color:#7df">---</div>
   </div>
@@ -107,12 +111,12 @@
 <canvas id="graph" height="200"></canvas>
 
 <div class="controls">
-  <button onclick="sendCmd('tare')">TARA</button>
+  <button onclick="sendCmd('tare')">ZERO</button>
 </div>
 
 <div class="controls">
   <div class="addr-row">
-    <input type="text" id="wsAddr" value="ws://thrust-gauge.local:81">
+    <input type="text" id="wsAddr" value="">
     <button onclick="reconnect()">Connect</button>
   </div>
 </div>
@@ -192,7 +196,7 @@ resizeCanvas();
 function connect(addr) {
   if (ws) { ws.onclose = null; ws.close(); }
   const el = document.getElementById('status');
-  el.textContent = 'Ühendamine...';
+  el.textContent = 'Connecting...';
   el.className   = '';
 
   ws = new WebSocket(addr);
@@ -204,6 +208,7 @@ function connect(addr) {
 
   ws.onmessage = e => {
     const d = JSON.parse(e.data);
+    document.getElementById('rpm').textContent     = d.rpm !== undefined ? Math.round(d.rpm) + ' RPM' : '---';
     document.getElementById('newtons').textContent = fmtN(d.g);
     document.getElementById('thrust').textContent  = fmtG(d.g);
     document.getElementById('maxval').textContent  = fmtG(d.avg);
@@ -231,7 +236,9 @@ function sendCmd(cmd) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
 }
 
-connect(document.getElementById('wsAddr').value);
+const defaultAddr = 'ws://' + location.hostname + '/ws';
+document.getElementById('wsAddr').value = defaultAddr;
+connect(defaultAddr);
 requestAnimationFrame(draw);
 </script>
 </body>

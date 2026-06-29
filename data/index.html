@@ -111,7 +111,7 @@
 <canvas id="graph" height="200"></canvas>
 
 <div class="controls">
-  <button onclick="sendCmd('tare')">TARA</button>
+  <button onclick="sendCmd('tare')">ZERO</button>
 </div>
 
 <div class="controls">
@@ -196,7 +196,7 @@ resizeCanvas();
 function connect(addr) {
   if (ws) { ws.onclose = null; ws.close(); }
   const el = document.getElementById('status');
-  el.textContent = 'Ühendamine...';
+  el.textContent = 'Connecting...';
   el.className   = '';
 
   ws = new WebSocket(addr);
@@ -236,7 +236,7 @@ function sendCmd(cmd) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
 }
 
-const defaultAddr = 'ws://' + location.hostname + ':81';
+const defaultAddr = 'ws://' + location.hostname + '/ws';
 document.getElementById('wsAddr').value = defaultAddr;
 connect(defaultAddr);
 requestAnimationFrame(draw);

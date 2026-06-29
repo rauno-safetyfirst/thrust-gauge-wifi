@@ -3,8 +3,7 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <LittleFS.h>
-#include <WebServer.h>
-#include <WebSocketsServer.h>
+#include <ESPAsyncWebServer.h>
 #include <HX711.h>
 
 // ── WiFi credentials ──────────────────────────────────────────────────────────
@@ -18,14 +17,14 @@ static constexpr uint8_t PIN_TARE   = 0;
 static constexpr uint8_t PIN_HALL   = 4;
 
 // ── Config ────────────────────────────────────────────────────────────────────
-static constexpr uint8_t  AVG_SAMPLES        = 5;
+static constexpr uint8_t  AVG_SAMPLES        = 1;
 static constexpr uint32_t AVG_WINDOW_MS      = 3000;
 static constexpr float    CALIBRATION_FACTOR = -218.3272f;
 static constexpr uint8_t  PULSES_PER_REV     = 2;
 static constexpr uint32_t RPM_TIMEOUT_US     = 2000000UL;
 
 // ── Hall sensor RPM ───────────────────────────────────────────────────────────
-static volatile uint32_t hallLastUs  = 0;
+static volatile uint32_t hallLastUs   = 0;
 static volatile uint32_t hallPeriodUs = 0;
 
 void IRAM_ATTR onHallPulse() {
@@ -45,7 +44,7 @@ static float calcRpm() {
     return 60000000.0f / ((float)period * PULSES_PER_REV);
 }
 
-// ── Rolling max ───────────────────────────────────────────────────────────────
+// ── Rolling average ───────────────────────────────────────────────────────────
 static constexpr uint8_t BUF_LEN = 24;
 struct Reading { uint32_t ts; float g; };
 static Reading buf[BUF_LEN];
@@ -61,33 +60,30 @@ static float slidingAvg() {
     uint32_t cutoff = millis() - AVG_WINDOW_MS;
     float sum = 0.0f;
     uint8_t n = 0;
-    for (uint8_t i = 0; i < bufCount; i++) {
+    for (uint8_t i = 0; i < bufCount; i++)
         if (buf[i].ts >= cutoff) { sum += buf[i].g; n++; }
-    }
     return n ? sum / n : 0.0f;
 }
 
-static void clearMax() { bufCount = 0; bufHead = 0; }
+static void clearBuf() { bufCount = 0; bufHead = 0; }
 
 // ── HX711 ─────────────────────────────────────────────────────────────────────
 HX711 scale;
 
-// ── WebSocket ─────────────────────────────────────────────────────────────────
-WebServer        http(80);
-WebSocketsServer ws(81);
+// ── Async web server + WebSocket ──────────────────────────────────────────────
+AsyncWebServer  http(80);
+AsyncWebSocket  ws("/ws");
 
-static void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t) {
-    if (type != WStype_TEXT) return;
-    String msg = String((char*)payload);
+static volatile bool pendingTare = false;
+
+static void onWsEvent(AsyncWebSocket*, AsyncWebSocketClient*, AwsEventType type,
+                      void* arg, uint8_t* data, size_t len) {
+    if (type != WS_EVT_DATA) return;
+    AwsFrameInfo* info = (AwsFrameInfo*)arg;
+    if (!info->final || info->index != 0 || info->len != len || info->opcode != WS_TEXT) return;
+    String msg = String((char*)data).substring(0, len);
     msg.trim();
-    if (msg == "tare") {
-        scale.tare();
-        clearMax();
-        Serial.println("Tare (WebSocket)");
-    } else if (msg == "resetmax") {
-        clearMax();
-        Serial.println("Max reset (WebSocket)");
-    }
+    if (msg == "tare") pendingTare = true;
 }
 
 // ── Serial calibration ────────────────────────────────────────────────────────
@@ -97,7 +93,7 @@ static void handleSerial() {
     s.trim();
     if (s == "tare") {
         scale.tare();
-        clearMax();
+        clearBuf();
         Serial.println("Tare OK");
     } else if (s.startsWith("cal:")) {
         float knownG = s.substring(4).toFloat();
@@ -115,15 +111,19 @@ static void handleSerial() {
 // ── Tare button (GPIO 0, active LOW) ─────────────────────────────────────────
 static void handleTare() {
     static bool pressed = false;
-    if (digitalRead(PIN_TARE) == LOW) {
-        if (!pressed) {
-            pressed = true;
-            scale.tare();
-            clearMax();
-            Serial.println("Tare OK");
-        }
-    } else {
-        pressed = false;
+    bool btnPressed = (digitalRead(PIN_TARE) == LOW);
+    if (btnPressed && !pressed) pendingTare = true;
+    pressed = btnPressed;
+}
+
+// ── WiFi reconnect watchdog ───────────────────────────────────────────────────
+static void handleWifi() {
+    static uint32_t lastCheck = 0;
+    if (millis() - lastCheck < 5000) return;
+    lastCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi lost, reconnecting...");
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
     }
 }
 
@@ -144,6 +144,7 @@ void setup() {
         delay(500);
         Serial.print(".");
     }
+    WiFi.setSleep(false);
     Serial.printf("\nIP: %s\n", WiFi.localIP().toString().c_str());
 
     if (MDNS.begin("thrust-gauge"))
@@ -155,38 +156,43 @@ void setup() {
     Serial.println("OTA ready (password: thrust)");
 
     LittleFS.begin(true);
-    http.on("/", HTTP_GET, []() {
-        File f = LittleFS.open("/index.html", "r");
-        if (f) { http.streamFile(f, "text/html"); f.close(); }
-        else     http.send(404, "text/plain", "index.html not found");
-    });
-    http.begin();
-    Serial.println("HTTP: http://thrust-gauge.local");
-
-    ws.begin();
     ws.onEvent(onWsEvent);
-    Serial.println("WebSocket: ws://thrust-gauge.local:81");
+    http.addHandler(&ws);
+    http.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+    http.begin();
+    Serial.println("HTTP: http://thrust-gauge.local  WS: ws://thrust-gauge.local/ws");
 }
 
 void loop() {
+    handleWifi();
     ArduinoOTA.handle();
-    http.handleClient();
-    ws.loop();
+    ws.cleanupClients();
     handleSerial();
     handleTare();
+
+    if (pendingTare) {
+        pendingTare = false;
+        scale.tare();
+        clearBuf();
+        Serial.println("Tare OK");
+    }
 
     if (!scale.is_ready()) return;
 
     float thrust = scale.get_units(AVG_SAMPLES);
-
     pushReading(thrust);
+
+    static uint32_t lastSend = 0;
+    uint32_t now = millis();
+    if (now - lastSend < 100) return;
+    lastSend = now;
+
     float avgG = slidingAvg();
     float rpm  = calcRpm();
 
-    String msg = "{\"g\":" + String(thrust, 1) +
-                 ",\"avg\":" + String(avgG, 1) +
-                 ",\"rpm\":" + String(rpm, 0) + "}";
-    ws.broadcastTXT(msg);
+    char msg[64];
+    snprintf(msg, sizeof(msg), "{\"g\":%.1f,\"avg\":%.1f,\"rpm\":%.0f}", thrust, avgG, rpm);
+    ws.textAll(msg);
 
     Serial.printf("%.1f g  avg(3s)=%.1f g  rpm=%.0f\n", thrust, avgG, rpm);
 }
