@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="et">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thrust Gauge</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+    gap: 16px;
+  }
+  h1 { font-size: 1.2rem; letter-spacing: 4px; color: #888; text-transform: uppercase; }
+  #status {
+    font-size: 0.85rem;
+    padding: 4px 12px;
+    border-radius: 4px;
+    background: #333;
+    color: #f90;
+  }
+  #status.connected { background: #1a3a1a; color: #4f4; }
+  #status.error     { background: #3a1a1a; color: #f44; }
+  .values {
+    display: flex;
+    gap: 40px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .box {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 20px 0;
+    text-align: center;
+    width: 275px;
+    flex-shrink: 0;
+  }
+  .box label { font-size: 0.75rem; color: #666; letter-spacing: 2px; display: block; margin-bottom: 8px; }
+  .box .val  { font-size: 3rem; font-weight: bold; color: #4af; letter-spacing: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .box .val.max-val { color: #fa4; }
+  canvas {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 900px;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: #2a2a2a;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 10px 24px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    letter-spacing: 1px;
+  }
+  button:hover { background: #3a3a3a; }
+  button:active { background: #444; }
+  .addr-row { display: flex; gap: 8px; align-items: center; }
+  input[type=text] {
+    background: #2a2a2a;
+    border: 1px solid #555;
+    border-radius: 6px;
+    color: #fff;
+    padding: 8px 14px;
+    font-family: monospace;
+    font-size: 0.85rem;
+    width: 280px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Thrust Gauge</h1>
+<div id="status">Connecting...</div>
+
+<div class="values">
+  <div class="box">
+    <label>NEWTONS</label>
+    <div class="val" id="newtons" style="color:#7df">---</div>
+  </div>
+  <div class="box">
+    <label>THRUST</label>
+    <div class="val" id="thrust">---</div>
+  </div>
+  <div class="box">
+    <label>AVG 3s</label>
+    <div class="val max-val" id="maxval">---</div>
+  </div>
+</div>
+
+<canvas id="graph" height="200"></canvas>
+
+<div class="controls">
+  <button onclick="sendCmd('tare')">TARA</button>
+</div>
+
+<div class="controls">
+  <div class="addr-row">
+    <input type="text" id="wsAddr" value="ws://thrust-gauge.local:81">
+    <button onclick="reconnect()">Connect</button>
+  </div>
+</div>
+
+<script>
+const canvas  = document.getElementById('graph');
+const ctx     = canvas.getContext('2d');
+const MAX_PTS = 120;
+const points  = [];
+let ws        = null;
+
+function fmtG(g) {
+  if (g === null || g === undefined) return '---';
+  return g >= 1000 ? (g / 1000).toFixed(3) + ' kg' : g.toFixed(1) + ' g';
+}
+
+function fmtN(g) {
+  if (g === null || g === undefined) return '---';
+  const n = g * 0.00981;
+  if (n < 10)  return n.toFixed(2) + ' N';
+  if (n < 100) return n.toFixed(1) + ' N';
+  return n.toFixed(0) + ' N';
+}
+
+function resizeCanvas() {
+  canvas.width  = canvas.clientWidth;
+  canvas.height = canvas.clientHeight || 200;
+}
+
+function draw() {
+  const W = canvas.width;
+  const H = canvas.height;
+
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, W, H);
+
+  if (points.length >= 2) {
+    const maxG   = Math.max(...points, 0);
+    const minG   = Math.min(...points, 0);
+    const range  = Math.max(maxG - minG, 1);
+    const pad    = 16;
+    const scaleY = (H - pad * 2) / range;
+    const zeroY  = H - pad - (0 - minG) * scaleY;
+    const stepX  = W / MAX_PTS;
+
+    // Zero line
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth   = 1;
+    ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
+
+    // Grid lines (above and below zero)
+    ctx.strokeStyle = '#2a2a2a';
+    for (let i = 1; i < 4; i++) {
+      const y = zeroY - (range / 4 * i) * scaleY;
+      if (y > pad && y < H - pad) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+    }
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#4af';
+    ctx.lineWidth   = 2;
+    for (let i = 0; i < points.length; i++) {
+      const x = W - i * stepX;
+      const y = zeroY - points[i] * scaleY;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  requestAnimationFrame(draw);
+}
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+function connect(addr) {
+  if (ws) { ws.onclose = null; ws.close(); }
+  const el = document.getElementById('status');
+  el.textContent = 'Ühendamine...';
+  el.className   = '';
+
+  ws = new WebSocket(addr);
+
+  ws.onopen = () => {
+    el.textContent = 'Connected';
+    el.className   = 'connected';
+  };
+
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    document.getElementById('newtons').textContent = fmtN(d.g);
+    document.getElementById('thrust').textContent  = fmtG(d.g);
+    document.getElementById('maxval').textContent  = fmtG(d.avg);
+    points.unshift(d.g);          // newest at index 0 → left side of graph
+    if (points.length > MAX_PTS) points.pop();
+  };
+
+  ws.onclose = () => {
+    el.textContent = 'Disconnected — reconnecting...';
+    el.className   = 'error';
+    setTimeout(() => connect(addr), 3000);
+  };
+
+  ws.onerror = () => {
+    el.textContent = 'Connection error';
+    el.className   = 'error';
+  };
+}
+
+function reconnect() {
+  connect(document.getElementById('wsAddr').value.trim());
+}
+
+function sendCmd(cmd) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(cmd);
+}
+
+connect(document.getElementById('wsAddr').value);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
